@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/mirastacklabs-ai/mirastack-sdk-go"
+	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
 	"go.uber.org/zap"
 )
 
@@ -29,6 +29,84 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 		Description:  "Search and analyze logs from VictoriaLogs using LogsQL. Supports log search, hit count time series, field discovery, field value enumeration, stream listing, and server-side stats aggregation.",
 		Permissions:  []mirastack.Permission{mirastack.PermissionRead},
 		DevOpsStages: []mirastack.DevOpsStage{mirastack.StageObserve},
+		Actions: []mirastack.Action{
+			{
+				ID:          "query",
+				Description: "Search log entries using LogsQL expressions",
+				Permission:  mirastack.PermissionRead,
+				Stages:      []mirastack.DevOpsStage{mirastack.StageObserve},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "query", Type: "string", Required: true, Description: "LogsQL query expression"},
+					{Name: "limit", Type: "string", Required: false, Description: "Maximum number of log entries to return (default: 100)"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Log entries in VictoriaLogs NDJSON format"},
+				},
+			},
+			{
+				ID:          "hits",
+				Description: "Get log hit count time series (histogram)",
+				Permission:  mirastack.PermissionRead,
+				Stages:      []mirastack.DevOpsStage{mirastack.StageObserve},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter expression"},
+					{Name: "step", Type: "string", Required: false, Description: "Time bucket step (e.g., 1m, 5m, 1h)"},
+					{Name: "field", Type: "string", Required: false, Description: "Field to group hits by"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Hit count time series"},
+				},
+			},
+			{
+				ID:          "field_names",
+				Description: "List all field names present in logs",
+				Permission:  mirastack.PermissionRead,
+				Stages:      []mirastack.DevOpsStage{mirastack.StageObserve},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter to scope fields"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Array of field names"},
+				},
+			},
+			{
+				ID:          "field_values",
+				Description: "List values for a specific log field",
+				Permission:  mirastack.PermissionRead,
+				Stages:      []mirastack.DevOpsStage{mirastack.StageObserve},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "field", Type: "string", Required: true, Description: "Field name to get values for"},
+					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter to scope values"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Array of field values"},
+				},
+			},
+			{
+				ID:          "streams",
+				Description: "List log streams (unique label combinations)",
+				Permission:  mirastack.PermissionRead,
+				Stages:      []mirastack.DevOpsStage{mirastack.StageObserve},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter to scope streams"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Array of log streams"},
+				},
+			},
+			{
+				ID:          "stats",
+				Description: "Aggregate server-side statistics from logs",
+				Permission:  mirastack.PermissionRead,
+				Stages:      []mirastack.DevOpsStage{mirastack.StageObserve},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "query", Type: "string", Required: true, Description: "LogsQL stats expression"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Aggregated statistics result"},
+				},
+			},
+		},
 		Intents: []mirastack.IntentPattern{
 			{Pattern: "search logs", Description: "Search log entries", Priority: 10},
 			{Pattern: "find errors in logs", Description: "Search for error-level log entries", Priority: 9},
@@ -41,19 +119,9 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 }
 
 func (p *QueryVLogsPlugin) Schema() *mirastack.PluginSchema {
+	info := p.Info()
 	return &mirastack.PluginSchema{
-		InputParams: []mirastack.ParamSchema{
-			{Name: "action", Type: "string", Required: true, Description: "One of: query, hits, field_names, field_values, streams, stats"},
-			{Name: "query", Type: "string", Required: false, Description: "LogsQL query expression (e.g., 'service_name:api-gateway AND level:error')"},
-			{Name: "start", Type: "string", Required: false, Description: "Start time (RFC3339 or relative like -1h)"},
-			{Name: "end", Type: "string", Required: false, Description: "End time (RFC3339 or 'now')"},
-			{Name: "limit", Type: "string", Required: false, Description: "Maximum number of log entries to return (default: 100)"},
-			{Name: "field", Type: "string", Required: false, Description: "Field name for field_values action; also used with hits for grouping"},
-			{Name: "step", Type: "string", Required: false, Description: "Time bucket step for hits action (e.g., 1m, 5m, 1h)"},
-		},
-		OutputParams: []mirastack.ParamSchema{
-			{Name: "result", Type: "json", Required: true, Description: "Query result in VictoriaLogs NDJSON response format"},
-		},
+		Actions: info.Actions,
 	}
 }
 
@@ -62,26 +130,26 @@ func (p *QueryVLogsPlugin) Execute(ctx context.Context, req *mirastack.ExecuteRe
 		p.logger, _ = zap.NewProduction()
 	}
 
-	action := req.Params["action"]
+	action := req.ActionID
 	if action == "" {
-		return &mirastack.ExecuteResponse{
-			Output: map[string]string{"error": "action parameter is required"},
-			Logs:   []string{"missing required parameter: action"},
-		}, nil
+		action = req.Params["action"]
+	}
+	if action == "" {
+		resp, _ := mirastack.RespondError("action parameter is required")
+		resp.Logs = []string{"missing required parameter: action"}
+		return resp, nil
 	}
 
 	result, err := p.dispatch(ctx, action, req.Params, req.TimeRange)
 	if err != nil {
-		return &mirastack.ExecuteResponse{
-			Output: map[string]string{"error": err.Error()},
-			Logs:   []string{fmt.Sprintf("action %s failed: %v", action, err)},
-		}, nil
+		resp, _ := mirastack.RespondError(err.Error())
+		resp.Logs = []string{fmt.Sprintf("action %s failed: %v", action, err)}
+		return resp, nil
 	}
 
-	return &mirastack.ExecuteResponse{
-		Output: map[string]string{"result": result},
-		Logs:   []string{fmt.Sprintf("action %s completed", action)},
-	}, nil
+	resp, _ := mirastack.RespondMap(map[string]any{"result": result})
+	resp.Logs = []string{fmt.Sprintf("action %s completed", action)}
+	return resp, nil
 }
 
 func (p *QueryVLogsPlugin) dispatch(ctx context.Context, action string, params map[string]string, tr *mirastack.TimeRange) (string, error) {

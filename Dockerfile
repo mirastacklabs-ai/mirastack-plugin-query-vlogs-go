@@ -13,12 +13,12 @@ ARG TARGETARCH
 WORKDIR /src
 
 # Copy SDK first (referenced via replace directive)
-COPY sdk/oss/mirastack-sdk-go/ sdk/oss/mirastack-sdk-go/
+COPY sdk/oss/agent-sdk/mirastack-agents-sdk-go/ sdk/oss/agent-sdk/mirastack-agents-sdk-go/
 
 # Copy plugin module
 COPY agents/oss/mirastack-plugin-query-vlogs-go/go.mod agents/oss/mirastack-plugin-query-vlogs-go/go.sum* agents/oss/mirastack-plugin-query-vlogs-go/
 WORKDIR /src/agents/oss/mirastack-plugin-query-vlogs-go
-RUN go mod edit -replace github.com/mirastacklabs-ai/mirastack-sdk-go=../../../sdk/oss/mirastack-sdk-go \
+RUN go mod edit -replace github.com/mirastacklabs-ai/mirastack-agents-sdk-go=../../../sdk/oss/agent-sdk/mirastack-agents-sdk-go \
     && go mod tidy \
     && go mod download
 
@@ -26,7 +26,7 @@ WORKDIR /src
 COPY agents/oss/mirastack-plugin-query-vlogs-go/ agents/oss/mirastack-plugin-query-vlogs-go/
 
 WORKDIR /src/agents/oss/mirastack-plugin-query-vlogs-go
-RUN go mod edit -replace github.com/mirastacklabs-ai/mirastack-sdk-go=../../../sdk/oss/mirastack-sdk-go \
+RUN go mod edit -replace github.com/mirastacklabs-ai/mirastack-agents-sdk-go=../../../sdk/oss/agent-sdk/mirastack-agents-sdk-go \
     && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -ldflags "-s -w" -o /mirastack-plugin-query-vlogs .
 

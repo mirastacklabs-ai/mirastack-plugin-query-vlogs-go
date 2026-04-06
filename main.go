@@ -1,6 +1,6 @@
 package main
 
-import "github.com/mirastacklabs-ai/mirastack-sdk-go"
+import "github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
 
 func main() {
 	mirastack.Serve(&QueryVLogsPlugin{})
