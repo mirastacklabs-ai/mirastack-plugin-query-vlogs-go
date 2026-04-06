@@ -13,7 +13,13 @@ import (
 // (Elasticsearch, Loki, etc.) will follow the same plugin contract with a different prefix.
 type QueryVLogsPlugin struct {
 	client *VLogsClient
+	engine *mirastack.EngineContext
 	logger *zap.Logger
+}
+
+// SetEngineContext injects the engine callback context (pull model config).
+func (p *QueryVLogsPlugin) SetEngineContext(ec *mirastack.EngineContext) {
+	p.engine = ec
 }
 
 func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
@@ -27,6 +33,9 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 			{Pattern: "search logs", Description: "Search log entries", Priority: 10},
 			{Pattern: "find errors in logs", Description: "Search for error-level log entries", Priority: 9},
 			{Pattern: "log field values", Description: "List field values from logs", Priority: 5},
+		},
+		ConfigParams: []mirastack.ConfigParam{
+			{Key: "logs_url", Type: "string", Required: true, Description: "VictoriaLogs base URL (e.g. http://victorialogs:9428)"},
 		},
 	}
 }
@@ -61,7 +70,7 @@ func (p *QueryVLogsPlugin) Execute(ctx context.Context, req *mirastack.ExecuteRe
 		}, nil
 	}
 
-	result, err := p.dispatch(ctx, action, req.Params)
+	result, err := p.dispatch(ctx, action, req.Params, req.TimeRange)
 	if err != nil {
 		return &mirastack.ExecuteResponse{
 			Output: map[string]string{"error": err.Error()},
@@ -75,30 +84,37 @@ func (p *QueryVLogsPlugin) Execute(ctx context.Context, req *mirastack.ExecuteRe
 	}, nil
 }
 
-func (p *QueryVLogsPlugin) dispatch(ctx context.Context, action string, params map[string]string) (string, error) {
+func (p *QueryVLogsPlugin) dispatch(ctx context.Context, action string, params map[string]string, tr *mirastack.TimeRange) (string, error) {
 	if p.client == nil {
 		return "", fmt.Errorf("plugin not configured: logs_url not set")
 	}
 
 	switch action {
 	case "query":
-		return p.actionQuery(ctx, params)
+		return p.actionQuery(ctx, params, tr)
 	case "hits":
-		return p.actionHits(ctx, params)
+		return p.actionHits(ctx, params, tr)
 	case "field_names":
-		return p.actionFieldNames(ctx, params)
+		return p.actionFieldNames(ctx, params, tr)
 	case "field_values":
-		return p.actionFieldValues(ctx, params)
+		return p.actionFieldValues(ctx, params, tr)
 	case "streams":
-		return p.actionStreams(ctx, params)
+		return p.actionStreams(ctx, params, tr)
 	case "stats":
-		return p.actionStats(ctx, params)
+		return p.actionStats(ctx, params, tr)
 	default:
 		return "", fmt.Errorf("unknown action: %s", action)
 	}
 }
 
 func (p *QueryVLogsPlugin) HealthCheck(ctx context.Context) error {
+	// Pull config from engine (cached 15s in SDK)
+	if p.engine != nil {
+		config, err := p.engine.GetConfig(ctx)
+		if err == nil {
+			p.applyConfig(config)
+		}
+	}
 	if p.client == nil {
 		return fmt.Errorf("not configured")
 	}
@@ -107,11 +123,15 @@ func (p *QueryVLogsPlugin) HealthCheck(ctx context.Context) error {
 }
 
 func (p *QueryVLogsPlugin) ConfigUpdated(_ context.Context, config map[string]string) error {
+	p.applyConfig(config)
+	return nil
+}
+
+func (p *QueryVLogsPlugin) applyConfig(config map[string]string) {
 	if url, ok := config["logs_url"]; ok && url != "" {
 		p.client = NewVLogsClient(url)
 		if p.logger != nil {
 			p.logger.Info("VictoriaLogs client updated", zap.String("url", url))
 		}
 	}
-	return nil
 }
