@@ -1,0 +1,13 @@
+# Build artifacts
+mirastack-*
+*.o
+*.a
+*.so
+*.test
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+

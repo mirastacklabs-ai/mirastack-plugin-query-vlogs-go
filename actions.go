@@ -92,3 +92,15 @@ func (p *QueryVLogsPlugin) actionStats(ctx context.Context, params map[string]st
 	start, end := resolveStartEnd(params, tr)
 	return p.client.StatsQuery(ctx, query, start, end)
 }
+
+func (p *QueryVLogsPlugin) actionDeleteStream(ctx context.Context, params map[string]string, tr *mirastack.TimeRange) (string, error) {
+	match := params["match"]
+	if match == "" {
+		return "", fmt.Errorf("match parameter is required for delete_stream")
+	}
+	start, end := resolveStartEnd(params, tr)
+	if err := p.client.DeleteStream(ctx, match, start, end); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(`{"status":"success","deleted":"%s"}`, match), nil
+}

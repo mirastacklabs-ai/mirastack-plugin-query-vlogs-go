@@ -32,8 +32,8 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 			"Use this plugin to search log entries, build hit-count histograms, discover fields " +
 			"and their values, list log streams, and compute server-side aggregations. " +
 			"Start with field_names for schema discovery, query for keyword search, and stats for aggregation.",
-		Permissions:  []mirastack.Permission{mirastack.PermissionRead},
-		DevOpsStages: []mirastack.DevOpsStage{mirastack.StageObserve},
+		Permissions:  []mirastack.Permission{mirastack.PermissionRead, mirastack.PermissionAdmin},
+		DevOpsStages: []mirastack.DevOpsStage{mirastack.StageObserve, mirastack.StageOperate},
 		Actions: []mirastack.Action{
 			{
 				ID: "query",
@@ -154,6 +154,25 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Name: "result", Type: "json", Required: true, Description: "Aggregated statistics result"},
 				},
 			},
+			{
+				ID: "delete_stream",
+				Description: "Delete log entries matching a LogsQL filter expression. " +
+					"This is a destructive ADMIN operation that permanently removes matching logs. " +
+					"Use only for data cleanup or compliance-driven log purging. Requires approval.",
+				Permission: mirastack.PermissionAdmin,
+				Stages:     []mirastack.DevOpsStage{mirastack.StageOperate},
+				Intents: []mirastack.IntentPattern{
+					{Pattern: "delete logs", Description: "Delete log entries from storage", Priority: 9},
+					{Pattern: "purge log stream", Description: "Purge a log stream permanently", Priority: 8},
+					{Pattern: "remove log entries", Description: "Remove specific log data", Priority: 7},
+				},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "match", Type: "string", Required: true, Description: "LogsQL filter expression selecting logs to delete (e.g. '_stream:{service=\"old-app\"}')"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Deletion confirmation"},
+				},
+			},
 		},
 		Intents: []mirastack.IntentPattern{
 			{Pattern: "search logs", Description: "Search log entries", Priority: 10},
@@ -244,6 +263,8 @@ func (p *QueryVLogsPlugin) dispatch(ctx context.Context, action string, params m
 		return p.actionStreams(ctx, params, tr)
 	case "stats":
 		return p.actionStats(ctx, params, tr)
+	case "delete_stream":
+		return p.actionDeleteStream(ctx, params, tr)
 	default:
 		return "", fmt.Errorf("unknown action: %s", action)
 	}

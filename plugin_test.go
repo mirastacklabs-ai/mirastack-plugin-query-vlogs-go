@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"testing"
+
+	mirastack "github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
 )
 
 func TestInfo_HasPerActionIntents(t *testing.T) {
@@ -96,5 +98,58 @@ func TestInfo_ActionDescriptionsEnriched(t *testing.T) {
 		if len(action.Description) < 50 {
 			t.Errorf("action %q description too short (%d chars)", action.ID, len(action.Description))
 		}
+	}
+}
+
+func TestInfo_DeleteStreamAction_AdminPermission(t *testing.T) {
+	p := &QueryVLogsPlugin{}
+	info := p.Info()
+
+	var found bool
+	for _, action := range info.Actions {
+		if action.ID == "delete_stream" {
+			found = true
+			if action.Permission != mirastack.PermissionAdmin {
+				t.Errorf("delete_stream should have ADMIN permission, got %v", action.Permission)
+			}
+			if len(action.Intents) == 0 {
+				t.Error("delete_stream should have per-action intents")
+			}
+			hasMatch := false
+			for _, p := range action.InputParams {
+				if p.Name == "match" && p.Required {
+					hasMatch = true
+				}
+			}
+			if !hasMatch {
+				t.Error("delete_stream should have required 'match' input param")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("delete_stream action not found in Info()")
+	}
+}
+
+func TestInfo_PluginPermissionsIncludeAdmin(t *testing.T) {
+	p := &QueryVLogsPlugin{}
+	info := p.Info()
+
+	hasAdmin := false
+	for _, perm := range info.Permissions {
+		if perm == mirastack.PermissionAdmin {
+			hasAdmin = true
+		}
+	}
+	if !hasAdmin {
+		t.Error("plugin permissions should include ADMIN")
+	}
+}
+
+func TestActionDeleteStream_RequiresMatch(t *testing.T) {
+	p := &QueryVLogsPlugin{}
+	_, err := p.actionDeleteStream(nil, map[string]string{}, nil)
+	if err == nil {
+		t.Error("expected error when match is empty")
 	}
 }
