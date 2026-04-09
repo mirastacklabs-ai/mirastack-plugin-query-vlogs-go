@@ -1,6 +1,4 @@
 # MIRASTACK Plugin — Query VLogs Go (multi-arch: linux/amd64, linux/arm64)
-# Build context must be the monorepo root (mirastack/)
-# so the local SDK replace directive resolves.
 #
 # Build:
 #   docker buildx build --platform linux/amd64,linux/arm64 \
@@ -12,22 +10,16 @@ ARG TARGETARCH
 
 WORKDIR /src
 
-# Copy SDK first (referenced via replace directive)
-COPY sdk/oss/agent-sdk/mirastack-agents-sdk-go/ sdk/oss/agent-sdk/mirastack-agents-sdk-go/
-
 # Copy plugin module
 COPY agents/oss/mirastack-plugin-query-vlogs-go/go.mod agents/oss/mirastack-plugin-query-vlogs-go/go.sum* agents/oss/mirastack-plugin-query-vlogs-go/
 WORKDIR /src/agents/oss/mirastack-plugin-query-vlogs-go
-RUN go mod edit -replace github.com/mirastacklabs-ai/mirastack-agents-sdk-go=../../../sdk/oss/agent-sdk/mirastack-agents-sdk-go \
-    && go mod tidy \
-    && go mod download
+RUN go mod download
 
 WORKDIR /src
 COPY agents/oss/mirastack-plugin-query-vlogs-go/ agents/oss/mirastack-plugin-query-vlogs-go/
 
 WORKDIR /src/agents/oss/mirastack-plugin-query-vlogs-go
-RUN go mod edit -replace github.com/mirastacklabs-ai/mirastack-agents-sdk-go=../../../sdk/oss/agent-sdk/mirastack-agents-sdk-go \
-    && CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
     go build -ldflags "-s -w" -o /mirastack-plugin-query-vlogs .
 
 FROM alpine:3.20
