@@ -5,7 +5,6 @@
 #     -f agents/oss/mirastack-plugin-query-vlogs-go/Dockerfile .
 
 FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
-ENV GOPRIVATE=github.com/mirastacklabs-ai/* GONOSUMCHECK=github.com/mirastacklabs-ai/* GONOSUMDB=github.com/mirastacklabs-ai/*
 ARG TARGETOS
 ARG TARGETARCH
 
