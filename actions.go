@@ -3,17 +3,35 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	mirastack "github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
 	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go/datetimeutils"
 )
 
+// isValidVLogsTimeParam rejects empty, whitespace-only, bare "-" and bare "+"
+// values that would cause VictoriaLogs to return parse errors.
+func isValidVLogsTimeParam(v string) bool {
+	v = strings.TrimSpace(v)
+	return v != "" && v != "-" && v != "+"
+}
+
 // resolveStartEnd returns start/end strings, preferring engine-parsed TimeRange.
+// When falling back to raw params, invalid values are cleared to empty string
+// so the VictoriaLogs API can apply its own server-side defaults.
 func resolveStartEnd(params map[string]string, tr *mirastack.TimeRange) (start, end string) {
 	if tr != nil && tr.StartEpochMs > 0 {
 		return datetimeutils.FormatRFC3339(tr.StartEpochMs), datetimeutils.FormatRFC3339(tr.EndEpochMs)
 	}
-	return params["start"], params["end"]
+	start = params["start"]
+	end = params["end"]
+	if !isValidVLogsTimeParam(start) {
+		start = ""
+	}
+	if !isValidVLogsTimeParam(end) {
+		end = ""
+	}
+	return start, end
 }
 
 // Action handlers for the query_vlogs plugin.
