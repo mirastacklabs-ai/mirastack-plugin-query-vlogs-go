@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
@@ -223,6 +224,13 @@ func (p *QueryVLogsPlugin) Execute(ctx context.Context, req *mirastack.ExecuteRe
 		p.logger, _ = zap.NewProduction()
 	}
 
+	// Pull config from engine if client is not yet initialized (cached 15s in SDK).
+	if p.client == nil && p.engine != nil {
+		if config, err := p.engine.GetConfig(ctx); err == nil {
+			p.applyConfig(config)
+		}
+	}
+
 	action := req.ActionID
 	if action == "" {
 		action = req.Params["action"]
@@ -240,7 +248,7 @@ func (p *QueryVLogsPlugin) Execute(ctx context.Context, req *mirastack.ExecuteRe
 		return resp, nil
 	}
 
-	resp, _ := mirastack.RespondMap(enrichLogsOutput(action, result))
+	resp, _ := mirastack.RespondJSON(enrichLogsOutput(action, result))
 	resp.Logs = []string{fmt.Sprintf("action %s completed", action)}
 	return resp, nil
 }
@@ -300,8 +308,12 @@ func (p *QueryVLogsPlugin) applyConfig(config map[string]string) {
 }
 
 // enrichLogsOutput wraps raw log query results with metadata for LLM consumption.
-func enrichLogsOutput(action, raw string) map[string]any {
-	out := map[string]any{
+// enrichLogsOutput wraps raw log results with metadata for LLM consumption.
+// Return type is map[string]string to honour the plugin CallPlugin contract:
+// the SDK unmarshals plugin responses into map[string]string and will fail
+// on any non-string JSON value. All counts and booleans are stringified here.
+func enrichLogsOutput(action, raw string) map[string]string {
+	out := map[string]string{
 		"action": action,
 		"result": raw,
 	}
@@ -309,7 +321,7 @@ func enrichLogsOutput(action, raw string) map[string]any {
 	const maxLen = 32000
 	if len(raw) > maxLen {
 		out["result"] = raw[:maxLen]
-		out["truncated"] = true
+		out["truncated"] = "true"
 	}
 
 	// For query action, count NDJSON lines (each non-empty line is a log entry).
@@ -321,7 +333,7 @@ func enrichLogsOutput(action, raw string) map[string]any {
 				count++
 			}
 		}
-		out["result_count"] = count
+		out["result_count"] = strconv.Itoa(count)
 	}
 
 	// For JSON array responses, extract count.
@@ -329,10 +341,10 @@ func enrichLogsOutput(action, raw string) map[string]any {
 	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
 		switch d := parsed.(type) {
 		case []any:
-			out["result_count"] = len(d)
+			out["result_count"] = strconv.Itoa(len(d))
 		case map[string]any:
 			if values, ok := d["values"].([]any); ok {
-				out["result_count"] = len(values)
+				out["result_count"] = strconv.Itoa(len(values))
 			}
 		}
 	}

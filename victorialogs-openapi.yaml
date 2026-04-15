@@ -1,0 +1,1920 @@
+openapi: 3.1.0
+info:
+  title: VictoriaLogs API
+  version: 1.0.0
+  description: |
+    REST API for VictoriaLogs - a log management and analytics service.
+    
+    This API provides endpoints for:
+    - **Log ingestion** via multiple protocols (Elasticsearch, Loki, Datadog, OpenTelemetry, Journald, Syslog, JSON)
+    - **LogSQL queries** for searching, filtering, and analyzing logs
+    - **Statistics and aggregations** over log data
+    - **Stream and field metadata** queries
+    - **Delete operations** for removing log data (when enabled)
+    
+    ## Multitenancy
+    VictoriaLogs supports multitenancy through AccountID and ProjectID headers.
+    TenantID format: `AccountID:ProjectID` (e.g., `123:456` or just `0:0` for default tenant).
+    
+    ## Authentication
+    Authentication is handled upstream (e.g., via vmauth, nginx, etc.) - not enforced by VictoriaLogs itself.
+  contact:
+    name: VictoriaMetrics
+    url: https://docs.victoriametrics.com/victorialogs/
+  license:
+    name: Apache 2.0
+    url: https://github.com/VictoriaMetrics/VictoriaLogs/blob/main/LICENSE
+
+servers:
+  - url: http://localhost:9428
+    description: VictoriaLogs single-node (default port 9428)
+  - url: http://localhost:9429
+    description: vlagent (default port 9429)
+
+tags:
+  - name: LogSQL Query
+    description: Endpoints for querying and analyzing logs using LogSQL
+  - name: LogSQL Metadata
+    description: Endpoints for retrieving metadata about streams and fields
+  - name: LogSQL Statistics
+    description: Endpoints for computing statistics and aggregations over logs
+  - name: Delete Operations
+    description: Endpoints for deleting log data (requires -delete.enable flag)
+  - name: Ingestion - Elasticsearch
+    description: Elasticsearch-compatible bulk ingestion endpoint
+  - name: Ingestion - Loki
+    description: Grafana Loki-compatible log ingestion
+  - name: Ingestion - Datadog
+    description: Datadog-compatible log ingestion
+  - name: Ingestion - OpenTelemetry
+    description: OpenTelemetry logs ingestion (protobuf only)
+  - name: Ingestion - Journald
+    description: Systemd journald binary format ingestion
+  - name: Ingestion - JSON
+    description: JSON line-delimited log ingestion
+  - name: Ingestion - Native
+    description: VictoriaLogs native binary protocol
+  - name: System
+    description: Health checks and metadata endpoints
+
+paths:
+  /:
+    get:
+      operationId: getRoot
+      summary: Get service information
+      description: Returns HTML page with VictoriaLogs version and useful links
+      tags:
+        - System
+      responses:
+        '200':
+          description: HTML page with service information
+          content:
+            text/html:
+              schema:
+                type: string
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /select/buildinfo:
+    get:
+      operationId: getBuildInfo
+      summary: Get build information
+      description: Returns VictoriaLogs version information
+      tags:
+        - System
+      responses:
+        '200':
+          description: Build information
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [success]
+                  data:
+                    type: object
+                    properties:
+                      version:
+                        type: string
+                        description: VictoriaLogs version
+              example:
+                status: success
+                data:
+                  version: "v0.40.0"
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+
+  /select/logsql/query:
+    get:
+      operationId: queryLogs
+      summary: Query logs
+      description: |
+        Execute a LogSQL query and retrieve matching log entries.
+        Returns log entries as newline-delimited JSON (application/stream+json).
+        
+        The query automatically applies `| sort by (_time) desc | offset <offset> | limit <limit>` 
+        when limit > 0 for optimal performance.
+      tags:
+        - LogSQL Query
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/TimeoutParam'
+        - name: limit
+          in: query
+          description: Maximum number of log entries to return (0 means no limit)
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1000
+          example: 100
+        - name: offset
+          in: query
+          description: Number of log entries to skip
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 0
+          example: 0
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Log entries matching the query
+          headers:
+            VL-Request-Duration-Seconds:
+              description: Query execution duration in seconds
+              schema:
+                type: string
+              example: "0.123"
+            AccountID:
+              description: Account ID used for the query
+              schema:
+                type: string
+              example: "0"
+            ProjectID:
+              description: Project ID used for the query
+              schema:
+                type: string
+              example: "0"
+            Access-Control-Expose-Headers:
+              description: CORS headers
+              schema:
+                type: string
+          content:
+            application/stream+json:
+              schema:
+                type: string
+                description: Newline-delimited JSON log entries
+              example: |
+                {"_time":"2024-01-15T10:30:00.123456789Z","_stream":"{host=\"server1\",app=\"nginx\"}","_msg":"GET /api/v1/query HTTP/1.1","status":"200","method":"GET"}
+                {"_time":"2024-01-15T10:29:55.987654321Z","_stream":"{host=\"server1\",app=\"nginx\"}","_msg":"POST /api/v1/insert HTTP/1.1","status":"201","method":"POST"}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/tail:
+    get:
+      operationId: tailLogs
+      summary: Live tail logs
+      description: |
+        Stream log entries in real-time as they are ingested.
+        Returns newline-delimited JSON stream (application/x-ndjson).
+        
+        This endpoint does not have concurrency limits or timeouts like other query endpoints.
+      tags:
+        - LogSQL Query
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - name: refresh_interval
+          in: query
+          description: How often to refresh and fetch new logs (in milliseconds)
+          schema:
+            type: integer
+            format: int64
+            default: 1000
+          example: 1000
+        - name: start_offset
+          in: query
+          description: Initial time offset from current time to start tailing (in milliseconds)
+          schema:
+            type: integer
+            format: int64
+            default: 5000
+          example: 5000
+        - name: offset
+          in: query
+          description: Time offset from current time for each refresh (in milliseconds)
+          schema:
+            type: integer
+            format: int64
+            default: 5000
+          example: 5000
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Streaming log entries
+          content:
+            application/x-ndjson:
+              schema:
+                type: string
+                description: Newline-delimited JSON log entries (continuous stream)
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /select/logsql/query_time_range:
+    get:
+      operationId: getQueryTimeRange
+      summary: Get query time range
+      description: |
+        Returns the actual time range that will be queried based on the query filters
+        and start/end parameters. Useful for understanding the scope of a query.
+      tags:
+        - LogSQL Query
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Time range information
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                  - start
+                  - end
+                  - hasTimeFilter
+                properties:
+                  start:
+                    type: string
+                    format: date-time
+                    description: Start of the time range (RFC3339Nano)
+                  end:
+                    type: string
+                    format: date-time
+                    description: End of the time range (RFC3339Nano)
+                  hasTimeFilter:
+                    type: boolean
+                    description: Whether the query contains a _time filter
+              example:
+                start: "2024-01-15T00:00:00.000000000Z"
+                end: "2024-01-15T23:59:59.999999999Z"
+                hasTimeFilter: true
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /select/logsql/facets:
+    get:
+      operationId: getFacets
+      summary: Get field facets
+      description: |
+        Returns facets (unique field values with hit counts) for the matching logs.
+        Useful for building filters and understanding field value distributions.
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - name: limit
+          in: query
+          description: Maximum number of unique fields to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1000
+          example: 10
+        - name: max_values_per_field
+          in: query
+          description: Maximum number of unique values per field
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 100
+          example: 10
+        - name: max_value_len
+          in: query
+          description: Maximum length of field values (longer values are truncated)
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1024
+          example: 100
+        - name: keep_const_fields
+          in: query
+          description: Whether to keep fields with constant values
+          schema:
+            type: boolean
+            default: false
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Field facets with value distributions
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  facets:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Facet'
+              example:
+                facets:
+                  - field_name: "status"
+                    values:
+                      - field_value: "200"
+                        hits: "1523"
+                      - field_value: "404"
+                        hits: "45"
+                      - field_value: "500"
+                        hits: "12"
+                  - field_name: "method"
+                    values:
+                      - field_value: "GET"
+                        hits: "1200"
+                      - field_value: "POST"
+                        hits: "380"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/hits:
+    get:
+      operationId: getHits
+      summary: Get hit counts over time
+      description: |
+        Returns time series of log hit counts, optionally grouped by specified fields.
+        Useful for building time-series charts and dashboards.
+      tags:
+        - LogSQL Statistics
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - name: step
+          in: query
+          description: Time bucket duration (e.g., '5m', '1h', '1d')
+          schema:
+            type: string
+            default: "1d"
+          example: "5m"
+        - name: offset
+          in: query
+          description: Time offset for bucket alignment (e.g., '0s', '30m')
+          schema:
+            type: string
+            default: "0s"
+          example: "0s"
+        - name: field
+          in: query
+          description: Field(s) to group by (can be specified multiple times)
+          schema:
+            type: array
+            items:
+              type: string
+          style: form
+          explode: true
+          example: ["status", "method"]
+        - name: fields_limit
+          in: query
+          description: Maximum number of unique field combinations to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1000
+          example: 10
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Time series of hit counts
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  hits:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/HitsSeries'
+              example:
+                hits:
+                  - fields: '{"status":"200"}'
+                    timestamps: ["2024-01-15T10:00:00.000000000Z", "2024-01-15T10:05:00.000000000Z"]
+                    values: [123, 145]
+                    total: 268
+                  - fields: '{"status":"500"}'
+                    timestamps: ["2024-01-15T10:00:00.000000000Z", "2024-01-15T10:05:00.000000000Z"]
+                    values: [5, 8]
+                    total: 13
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/field_names:
+    get:
+      operationId: getFieldNames
+      summary: Get field names
+      description: Returns list of unique field names present in logs matching the query
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: List of field names with hit counts
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValuesWithHits'
+              example:
+                values:
+                  - value: "_time"
+                    hits: 10000
+                  - value: "_msg"
+                    hits: 10000
+                  - value: "status"
+                    hits: 9500
+                  - value: "method"
+                    hits: 9500
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/field_values:
+    get:
+      operationId: getFieldValues
+      summary: Get field values
+      description: Returns unique values for a specific field in logs matching the query
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - name: field
+          in: query
+          required: true
+          description: Name of the field to get values for
+          schema:
+            type: string
+          example: "status"
+        - name: limit
+          in: query
+          description: Maximum number of unique values to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1000
+          example: 100
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: List of field values with hit counts
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValuesWithHits'
+              example:
+                values:
+                  - value: "200"
+                    hits: 8500
+                  - value: "404"
+                    hits: 800
+                  - value: "500"
+                    hits: 200
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/stream_field_names:
+    get:
+      operationId: getStreamFieldNames
+      summary: Get stream field names
+      description: Returns list of unique stream field names (fields used to identify log streams)
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: List of stream field names with hit counts
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValuesWithHits'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/stream_field_values:
+    get:
+      operationId: getStreamFieldValues
+      summary: Get stream field values
+      description: Returns unique values for a specific stream field
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - name: field
+          in: query
+          required: true
+          description: Name of the stream field to get values for
+          schema:
+            type: string
+          example: "host"
+        - name: limit
+          in: query
+          description: Maximum number of unique values to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1000
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: List of stream field values with hit counts
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValuesWithHits'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/stream_ids:
+    get:
+      operationId: getStreamIDs
+      summary: Get stream IDs
+      description: Returns list of unique stream IDs matching the query
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - name: limit
+          in: query
+          description: Maximum number of stream IDs to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1000
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: List of stream IDs with hit counts
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValuesWithHits'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/streams:
+    get:
+      operationId: getStreams
+      summary: Get log streams
+      description: Returns list of unique log streams (combinations of stream field values) matching the query
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - name: limit
+          in: query
+          description: Maximum number of streams to return
+          schema:
+            type: integer
+            format: int32
+            minimum: 0
+            default: 1000
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: List of streams with hit counts
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValuesWithHits'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/stats_query:
+    get:
+      operationId: getStatsQuery
+      summary: Execute stats query
+      description: |
+        Execute a LogSQL stats query and return aggregated statistics.
+        Queries must contain stats functions like count(), sum(), avg(), etc.
+      tags:
+        - LogSQL Statistics
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - $ref: '#/components/parameters/TimeParam'
+        - $ref: '#/components/parameters/TimeoutParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Statistics results
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsQueryResponse'
+              example:
+                data:
+                  - metric:
+                      __name__: "count"
+                      status: "200"
+                    value: [1704787200, "8500"]
+                  - metric:
+                      __name__: "count"
+                      status: "500"
+                    value: [1704787200, "200"]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/logsql/stats_query_range:
+    get:
+      operationId: getStatsQueryRange
+      summary: Execute stats query over time range
+      description: |
+        Execute a LogSQL stats query over a time range with specified step interval.
+        Automatically groups results by time buckets.
+      tags:
+        - LogSQL Statistics
+      parameters:
+        - $ref: '#/components/parameters/QueryParam'
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+        - name: step
+          in: query
+          description: Time bucket duration (e.g., '5m', '1h', '1d')
+          schema:
+            type: string
+            default: "1d"
+          example: "5m"
+        - $ref: '#/components/parameters/TimeoutParam'
+        - $ref: '#/components/parameters/ExtraFiltersParam'
+        - $ref: '#/components/parameters/ExtraStreamFiltersParam'
+        - $ref: '#/components/parameters/AllowPartialResponseParam'
+        - $ref: '#/components/parameters/HiddenFieldsFiltersParam'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Time series statistics results
+          headers:
+            VL-Request-Duration-Seconds:
+              $ref: '#/components/headers/VL-Request-Duration-Seconds'
+            AccountID:
+              $ref: '#/components/headers/AccountID'
+            ProjectID:
+              $ref: '#/components/headers/ProjectID'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsQueryRangeResponse'
+              example:
+                data:
+                  - metric:
+                      __name__: "count"
+                      status: "200"
+                    values:
+                      - [1704787200, "4250"]
+                      - [1704790800, "4250"]
+                  - metric:
+                      __name__: "count"
+                      status: "500"
+                    values:
+                      - [1704787200, "100"]
+                      - [1704790800, "100"]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /select/tenant_ids:
+    get:
+      operationId: getTenantIDs
+      summary: Get tenant IDs
+      description: |
+        Returns list of tenant IDs that have logs in the specified time range.
+        This endpoint cannot be used when AccountID header is set (security measure).
+      tags:
+        - LogSQL Metadata
+      parameters:
+        - $ref: '#/components/parameters/StartParam'
+        - $ref: '#/components/parameters/EndParam'
+      responses:
+        '200':
+          description: List of tenant IDs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TenantID'
+              example:
+                - account_id: 0
+                  project_id: 0
+                - account_id: 123
+                  project_id: 456
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /delete/run_task:
+    post:
+      operationId: runDeleteTask
+      summary: Run delete task
+      description: |
+        Initiates a background task to delete logs matching the filter.
+        Requires -delete.enable flag to be set.
+      tags:
+        - Delete Operations
+      parameters:
+        - name: filter
+          in: query
+          required: true
+          description: LogSQL filter expression specifying which logs to delete
+          schema:
+            type: string
+          example: '_time:[2024-01-01, 2024-01-31] AND status:500'
+        - $ref: '#/components/parameters/AccountIDHeader'
+        - $ref: '#/components/parameters/ProjectIDHeader'
+      responses:
+        '200':
+          description: Delete task created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  task_id:
+                    type: string
+                    description: Unique identifier for the delete task
+              example:
+                task_id: "1704787200123456789"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Delete operations are disabled
+
+  /delete/stop_task:
+    post:
+      operationId: stopDeleteTask
+      summary: Stop delete task
+      description: Stops a running delete task
+      tags:
+        - Delete Operations
+      parameters:
+        - name: task_id
+          in: query
+          required: true
+          description: ID of the delete task to stop
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Delete task stopped successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+              example:
+                status: "ok"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Delete operations are disabled
+
+  /delete/active_tasks:
+    get:
+      operationId: getActiveTasks
+      summary: Get active delete tasks
+      description: Returns list of currently active delete tasks
+      tags:
+        - Delete Operations
+      responses:
+        '200':
+          description: List of active delete tasks
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/DeleteTask'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Delete operations are disabled
+
+  /insert/elasticsearch/_bulk:
+    post:
+      operationId: bulkInsertElasticsearch
+      summary: Bulk insert logs (Elasticsearch compatible)
+      description: |
+        Ingest logs using Elasticsearch-compatible bulk API format.
+        Supports both "create" and "index" commands.
+        
+        The request body should contain alternating lines:
+        1. Action line: `{"create": {...}}` or `{"index": {...}}`
+        2. Document line: JSON log entry
+      tags:
+        - Ingestion - Elasticsearch
+      parameters:
+        - $ref: '#/components/parameters/IngestionCommonParams'
+      requestBody:
+        required: true
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+              description: Newline-delimited JSON (action line, document line, ...)
+            example: |
+              {"create":{}}
+              {"@timestamp":"2024-01-15T10:30:00.123Z","message":"User logged in","user_id":123,"status":"success"}
+              {"index":{}}
+              {"@timestamp":"2024-01-15T10:30:01.456Z","message":"API request received","method":"POST","path":"/api/v1/data"}
+      responses:
+        '200':
+          description: Bulk operation completed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  took:
+                    type: integer
+                    format: int64
+                    description: Time taken in milliseconds
+                  errors:
+                    type: boolean
+                    description: Whether any errors occurred
+              example:
+                took: 45
+                errors: false
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /insert/elasticsearch/:
+    get:
+      operationId: pingElasticsearch
+      summary: Elasticsearch compatibility check
+      description: Returns Elasticsearch version information for compatibility
+      tags:
+        - Ingestion - Elasticsearch
+      responses:
+        '200':
+          description: Version information
+          headers:
+            X-Elastic-Product:
+              description: Product identifier
+              schema:
+                type: string
+                enum: [Elasticsearch]
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: object
+                    properties:
+                      number:
+                        type: string
+              example:
+                version:
+                  number: "8.9.0"
+    head:
+      operationId: headElasticsearch
+      summary: Elasticsearch health check
+      description: Health check endpoint for Logstash compatibility
+      tags:
+        - Ingestion - Elasticsearch
+      responses:
+        '200':
+          description: Service is healthy
+          headers:
+            X-Elastic-Product:
+              description: Product identifier
+              schema:
+                type: string
+                enum: [Elasticsearch]
+
+  /insert/elasticsearch/_license:
+    get:
+      operationId: getElasticsearchLicense
+      summary: Get Elasticsearch license info
+      description: Returns fake license information for Elasticsearch compatibility
+      tags:
+        - Ingestion - Elasticsearch
+      responses:
+        '200':
+          description: License information
+          content:
+            application/json:
+              schema:
+                type: object
+              example:
+                license:
+                  uid: "cbff45e7-c553-41f7-ae4f-9205eabd80xx"
+                  type: "oss"
+                  status: "active"
+                  expiry_date_in_millis: 4000000000000
+
+  /insert/loki/api/v1/push:
+    post:
+      operationId: pushLoki
+      summary: Push logs (Loki compatible)
+      description: |
+        Ingest logs using Grafana Loki-compatible API.
+        Supports both JSON and Protobuf formats.
+      tags:
+        - Ingestion - Loki
+      parameters:
+        - $ref: '#/components/parameters/IngestionCommonParams'
+        - name: X-Scope-OrgID
+          in: header
+          description: Loki tenant ID (used if AccountID/ProjectID headers are not set)
+          schema:
+            type: string
+          example: "tenant1"
+        - name: disable_message_parsing
+          in: query
+          description: Whether to disable automatic JSON parsing of log messages
+          schema:
+            type: boolean
+            default: false
+        - name: VL-Loki-Disable-Message-Parsing
+          in: header
+          description: Whether to disable automatic JSON parsing of log messages
+          schema:
+            type: boolean
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LokiPushRequest'
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '204':
+          description: Logs ingested successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /insert/loki/ready:
+    get:
+      operationId: readyLoki
+      summary: Loki readiness check
+      description: Check if the service is ready to accept logs
+      tags:
+        - Ingestion - Loki
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum: [ready]
+
+  /insert/datadog/api/v1/validate:
+    post:
+      operationId: validateDatadog
+      summary: Datadog validation endpoint
+      description: Fake validation endpoint for Datadog compatibility
+      tags:
+        - Ingestion - Datadog
+      responses:
+        '200':
+          description: Validation successful
+          content:
+            application/json:
+              schema:
+                type: object
+              example: {}
+
+  /insert/datadog/api/v2/logs:
+    post:
+      operationId: logsDatadog
+      summary: Ingest logs (Datadog compatible)
+      description: |
+        Ingest logs using Datadog-compatible API format.
+        Supports gzip and deflate compression.
+      tags:
+        - Ingestion - Datadog
+      parameters:
+        - $ref: '#/components/parameters/IngestionCommonParams'
+        - name: dd-message-timestamp
+          in: header
+          description: Default timestamp for logs (milliseconds since epoch)
+          schema:
+            type: string
+          example: "1704787200000"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DatadogLogsRequest'
+      responses:
+        '202':
+          description: Logs accepted for processing
+          content:
+            application/json:
+              schema:
+                type: object
+              example: {}
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /insert/opentelemetry/v1/logs:
+    post:
+      operationId: logsOpenTelemetry
+      summary: Ingest logs (OpenTelemetry compatible)
+      description: |
+        Ingest logs using OpenTelemetry OTLP protocol.
+        Only protobuf format is supported (JSON is not supported).
+      tags:
+        - Ingestion - OpenTelemetry
+      parameters:
+        - $ref: '#/components/parameters/IngestionCommonParams'
+      requestBody:
+        required: true
+        content:
+          application/x-protobuf:
+            schema:
+              type: string
+              format: binary
+              description: OpenTelemetry LogsData protobuf message
+      responses:
+        '200':
+          description: Logs ingested successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /insert/journald/upload:
+    post:
+      operationId: uploadJournald
+      summary: Upload journald logs
+      description: |
+        Ingest logs in systemd journald binary export format.
+        Content-Type must be 'application/vnd.fdo.journal'.
+      tags:
+        - Ingestion - Journald
+      parameters:
+        - $ref: '#/components/parameters/IngestionCommonParams'
+      requestBody:
+        required: true
+        content:
+          application/vnd.fdo.journal:
+            schema:
+              type: string
+              format: binary
+              description: Journald binary export format
+      responses:
+        '200':
+          description: Logs ingested successfully
+          headers:
+            Accept-Encoding:
+              description: Supported compression algorithms for future requests
+              schema:
+                type: string
+              example: "zstd"
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /insert/jsonline:
+    post:
+      operationId: insertJsonline
+      summary: Insert JSON line logs
+      description: |
+        Ingest logs as newline-delimited JSON.
+        Each line should be a complete JSON object representing one log entry.
+      tags:
+        - Ingestion - JSON
+      parameters:
+        - $ref: '#/components/parameters/IngestionCommonParams'
+      requestBody:
+        required: true
+        content:
+          application/x-ndjson:
+            schema:
+              type: string
+              description: Newline-delimited JSON log entries
+            example: |
+              {"_time":"2024-01-15T10:30:00.123456789Z","_msg":"User logged in","user_id":123}
+              {"_time":"2024-01-15T10:30:01.456789012Z","_msg":"API request","method":"POST","path":"/api/data"}
+      responses:
+        '200':
+          description: Logs ingested successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /insert/native:
+    post:
+      operationId: insertNative
+      summary: Insert logs (native protocol)
+      description: |
+        Ingest logs using VictoriaLogs native binary protocol.
+        This is the most efficient ingestion method.
+      tags:
+        - Ingestion - Native
+      parameters:
+        - name: version
+          in: query
+          required: true
+          description: Protocol version (must be '1')
+          schema:
+            type: string
+            enum: ['1']
+        - $ref: '#/components/parameters/IngestionCommonParams'
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+              description: VictoriaLogs native binary format
+      responses:
+        '200':
+          description: Logs ingested successfully
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /insert/ready:
+    get:
+      operationId: insertReady
+      summary: Ingestion readiness check
+      description: Check if the service is ready to accept log ingestion
+      tags:
+        - System
+      responses:
+        '200':
+          description: Service is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok]
+              example:
+                status: "ok"
+
+components:
+  parameters:
+    QueryParam:
+      name: query
+      in: query
+      required: true
+      description: LogSQL query expression
+      schema:
+        type: string
+      example: '_time:[2024-01-15, 2024-01-16) AND status:500'
+
+    StartParam:
+      name: start
+      in: query
+      description: |
+        Start time for the query (inclusive). Accepts various formats:
+        - RFC3339: '2024-01-15T00:00:00Z'
+        - Relative: 'now-1h', 'now-24h', 'now-7d'
+        - Unix timestamp: '1704787200' (seconds) or '1704787200000' (milliseconds)
+      schema:
+        type: string
+      example: '2024-01-15T00:00:00Z'
+
+    EndParam:
+      name: end
+      in: query
+      description: |
+        End time for the query (exclusive). Same format options as start.
+      schema:
+        type: string
+      example: '2024-01-16T00:00:00Z'
+
+    TimeParam:
+      name: time
+      in: query
+      description: |
+        Point in time for query evaluation. Same format options as start/end.
+        Defaults to 'end' if specified, otherwise current time.
+      schema:
+        type: string
+
+    TimeoutParam:
+      name: timeout
+      in: query
+      description: Maximum query execution time in milliseconds
+      schema:
+        type: integer
+        format: int64
+        default: 30000
+      example: 5000
+
+    ExtraFiltersParam:
+      name: extra_filters
+      in: query
+      description: |
+        Additional filters to apply to the query. Can be specified multiple times.
+        Accepts LogSQL filter syntax or JSON object format: `{"field":"value"}`
+      schema:
+        type: array
+        items:
+          type: string
+      style: form
+      explode: true
+      example: ['status:200', 'method:GET']
+
+    ExtraStreamFiltersParam:
+      name: extra_stream_filters
+      in: query
+      description: |
+        Additional stream filters (exact match on stream fields).
+        Accepts LogSQL syntax or JSON: `{"host":"server1"}`
+      schema:
+        type: array
+        items:
+          type: string
+      style: form
+      explode: true
+
+    AllowPartialResponseParam:
+      name: allow_partial_response
+      in: query
+      description: Whether to return partial results if some storage nodes are unavailable (cluster mode only)
+      schema:
+        type: boolean
+        default: false
+
+    HiddenFieldsFiltersParam:
+      name: hidden_fields_filters
+      in: query
+      description: |
+        Fields or field patterns to hide from query results.
+        Can be JSON array or comma-separated list.
+      schema:
+        oneOf:
+          - type: string
+          - type: array
+            items:
+              type: string
+      example: '["password", "secret_*"]'
+
+    AccountIDHeader:
+      name: AccountID
+      in: header
+      description: Account ID for multitenancy
+      schema:
+        type: string
+      example: "0"
+
+    ProjectIDHeader:
+      name: ProjectID
+      in: header
+      description: Project ID for multitenancy
+      schema:
+        type: string
+      example: "0"
+
+    IngestionCommonParams:
+      name: _time_field
+      in: query
+      description: |
+        Name(s) of field(s) containing the log timestamp.
+        Can specify multiple fields (will use first non-empty).
+        Also supported via VL-Time-Field header.
+      schema:
+        type: array
+        items:
+          type: string
+      style: form
+      explode: true
+      example: ['@timestamp', 'timestamp', '_time']
+      x-additional-params:
+        - name: _msg_field
+          in: query
+          description: |
+            Name(s) of field(s) containing the log message.
+            Also supported via VL-Msg-Field header.
+          schema:
+            type: array
+            items:
+              type: string
+          example: ['message', 'msg', 'log']
+        - name: _stream_fields
+          in: query
+          description: |
+            Comma-separated list of fields to use as stream identifiers.
+            Also supported via VL-Stream-Fields header.
+          schema:
+            type: string
+          example: 'host,app,environment'
+        - name: ignore_fields
+          in: query
+          description: |
+            Comma-separated list of fields to ignore during ingestion.
+            Also supported via VL-Ignore-Fields header.
+          schema:
+            type: string
+        - name: decolorize_fields
+          in: query
+          description: |
+            Comma-separated list of fields to remove ANSI color codes from.
+            Also supported via VL-Decolorize-Fields header.
+          schema:
+            type: string
+        - name: extra_fields
+          in: query
+          description: |
+            Additional fields to add to all log entries in format "field=value".
+            Can be specified multiple times. Also supported via VL-Extra-Fields header.
+          schema:
+            type: array
+            items:
+              type: string
+          example: ['environment=production', 'datacenter=us-east-1']
+        - name: debug
+          in: query
+          description: |
+            Enable debug mode (logs are not stored, only printed).
+            Also supported via VL-Debug header.
+          schema:
+            type: boolean
+
+  headers:
+    VL-Request-Duration-Seconds:
+      description: Query execution duration in seconds
+      schema:
+        type: string
+      example: "0.123"
+
+    AccountID:
+      description: Account ID used for the operation
+      schema:
+        type: string
+      example: "0"
+
+    ProjectID:
+      description: Project ID used for the operation
+      schema:
+        type: string
+      example: "0"
+
+  schemas:
+    TenantID:
+      type: object
+      required:
+        - account_id
+        - project_id
+      properties:
+        account_id:
+          type: integer
+          format: uint32
+          description: Account ID
+        project_id:
+          type: integer
+          format: uint32
+          description: Project ID
+      example:
+        account_id: 123
+        project_id: 456
+
+    Facet:
+      type: object
+      required:
+        - field_name
+        - values
+      properties:
+        field_name:
+          type: string
+          description: Name of the field
+        values:
+          type: array
+          items:
+            $ref: '#/components/schemas/FacetValue'
+      example:
+        field_name: "status"
+        values:
+          - field_value: "200"
+            hits: "8500"
+          - field_value: "404"
+            hits: "800"
+
+    FacetValue:
+      type: object
+      required:
+        - field_value
+        - hits
+      properties:
+        field_value:
+          type: string
+          description: Unique value of the field
+        hits:
+          type: string
+          description: Number of log entries with this value (as string to support large numbers)
+      example:
+        field_value: "200"
+        hits: "8500"
+
+    HitsSeries:
+      type: object
+      required:
+        - fields
+        - timestamps
+        - values
+        - total
+      properties:
+        fields:
+          type: string
+          description: JSON object of field name-value pairs that identify this series
+        timestamps:
+          type: array
+          items:
+            type: string
+            format: date-time
+          description: Array of timestamps in RFC3339Nano format
+        values:
+          type: array
+          items:
+            type: integer
+            format: uint64
+          description: Array of hit counts corresponding to timestamps
+        total:
+          type: integer
+          format: uint64
+          description: Total hits across all time buckets
+      example:
+        fields: '{"status":"200","method":"GET"}'
+        timestamps: ["2024-01-15T10:00:00.000000000Z", "2024-01-15T10:05:00.000000000Z"]
+        values: [123, 145]
+        total: 268
+
+    ValuesWithHits:
+      type: object
+      required:
+        - values
+      properties:
+        values:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValueWithHits'
+      example:
+        values:
+          - value: "200"
+            hits: 8500
+          - value: "404"
+            hits: 800
+
+    ValueWithHits:
+      type: object
+      required:
+        - value
+        - hits
+      properties:
+        value:
+          type: string
+          description: The value
+        hits:
+          type: integer
+          format: uint64
+          description: Number of occurrences
+      example:
+        value: "200"
+        hits: 8500
+
+    StatsQueryResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatsDataPoint'
+      x-note: Format compatible with Prometheus instant query response
+
+    StatsDataPoint:
+      type: object
+      required:
+        - metric
+        - value
+      properties:
+        metric:
+          type: object
+          description: Label set identifying this series (includes __name__ for the stat name)
+          additionalProperties:
+            type: string
+        value:
+          type: array
+          minItems: 2
+          maxItems: 2
+          items:
+            oneOf:
+              - type: integer
+                format: int64
+              - type: string
+          description: '[timestamp, value] tuple'
+      example:
+        metric:
+          __name__: "count"
+          status: "200"
+        value: [1704787200, "8500"]
+
+    StatsQueryRangeResponse:
+      type: object
+      required:
+        - data
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/StatsRangeDataSeries'
+      x-note: Format compatible with Prometheus range query response
+
+    StatsRangeDataSeries:
+      type: object
+      required:
+        - metric
+        - values
+      properties:
+        metric:
+          type: object
+          description: Label set identifying this series
+          additionalProperties:
+            type: string
+        values:
+          type: array
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items:
+              oneOf:
+                - type: integer
+                  format: int64
+                - type: string
+            description: '[timestamp, value] tuples'
+      example:
+        metric:
+          __name__: "count"
+          status: "200"
+        values:
+          - [1704787200, "4250"]
+          - [1704790800, "4250"]
+
+    DeleteTask:
+      type: object
+      properties:
+        task_id:
+          type: string
+          description: Unique task identifier
+        tenant_ids:
+          type: array
+          items:
+            $ref: '#/components/schemas/TenantID'
+        filter:
+          type: string
+          description: LogSQL filter for logs to delete
+        timestamp:
+          type: integer
+          format: int64
+          description: Task creation timestamp (nanoseconds)
+        status:
+          type: string
+          description: Current task status
+      x-note: "Exact schema derived from runtime behavior - not fully specified in code"
+
+    LokiPushRequest:
+      type: object
+      required:
+        - streams
+      properties:
+        streams:
+          type: array
+          items:
+            $ref: '#/components/schemas/LokiStream'
+      example:
+        streams:
+          - stream:
+              job: "varlogs"
+              host: "server1"
+            values:
+              - ["1704787200123456789", "log message 1"]
+              - ["1704787201123456789", "log message 2"]
+
+    LokiStream:
+      type: object
+      required:
+        - stream
+        - values
+      properties:
+        stream:
+          type: object
+          description: Label set identifying the stream
+          additionalProperties:
+            type: string
+        values:
+          type: array
+          items:
+            type: array
+            minItems: 2
+            maxItems: 2
+            items:
+              type: string
+            description: '[timestamp_ns, log_line]'
+      example:
+        stream:
+          job: "varlogs"
+          host: "server1"
+        values:
+          - ["1704787200123456789", "log message"]
+
+    DatadogLogsRequest:
+      type: array
+      items:
+        $ref: '#/components/schemas/DatadogLogEntry'
+      example:
+        - message: "User logged in"
+          timestamp: 1704787200000
+          status: "info"
+          service: "auth-service"
+          host: "server1"
+          ddtags: "env:production,version:1.0.0"
+
+    DatadogLogEntry:
+      type: object
+      required:
+        - message
+      properties:
+        message:
+          oneOf:
+            - type: string
+            - type: object
+          description: Log message (string or nested object for serverless)
+        timestamp:
+          type: integer
+          format: int64
+          description: Timestamp in milliseconds since epoch
+        status:
+          type: string
+          description: Log level/status
+        service:
+          type: string
+          description: Service name
+        host:
+          type: string
+          description: Hostname
+        ddtags:
+          type: string
+          description: Comma-separated tags in format "key:value,key:value"
+      additionalProperties: true
+      example:
+        message: "Request processed"
+        timestamp: 1704787200000
+        status: "info"
+        service: "api"
+        host: "server1"
+        ddtags: "env:prod,region:us-east"
+
+  responses:
+    BadRequest:
+      description: Bad request - invalid parameters or malformed request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [error]
+              msg:
+                type: string
+                description: Error message
+          example:
+            status: error
+            msg: "cannot parse query: unexpected token"
+
+    ServiceUnavailable:
+      description: Service unavailable - timeout or resource exhaustion
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [error]
+              msg:
+                type: string
+          example:
+            status: error
+            msg: "the request couldn't be executed in 30.000 seconds"
+
+    MethodNotAllowed:
+      description: HTTP method not allowed
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [error]
+              msg:
+                type: string
+
+    Forbidden:
+      description: Forbidden - operation not allowed
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              status:
+                type: string
+                enum: [error]
+              msg:
+                type: string

@@ -3,7 +3,7 @@ module github.com/mirastacklabs-ai/mirastack-plugin-query-vlogs
 go 1.24.0
 
 require (
-	github.com/mirastacklabs-ai/mirastack-agents-sdk-go v1.0.1
+	github.com/mirastacklabs-ai/mirastack-agents-sdk-go v1.4.0
 	go.uber.org/zap v1.27.0
 )
 

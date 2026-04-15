@@ -55,8 +55,8 @@ func TestEnrichLogsOutput_CountsNDJSONLines(t *testing.T) {
 	ndjson := "{\"msg\":\"line1\"}\n{\"msg\":\"line2\"}\n{\"msg\":\"line3\"}\n"
 	out := enrichLogsOutput("query", ndjson)
 
-	if out["result_count"] != 3 {
-		t.Errorf("expected result_count=3, got %v", out["result_count"])
+	if out["result_count"] != "3" {
+		t.Errorf("expected result_count=\"3\", got %v", out["result_count"])
 	}
 }
 
@@ -64,8 +64,8 @@ func TestEnrichLogsOutput_JSONArray(t *testing.T) {
 	raw := `["field_a","field_b","field_c"]`
 	out := enrichLogsOutput("field_names", raw)
 
-	if out["result_count"] != 3 {
-		t.Errorf("expected result_count=3, got %v", out["result_count"])
+	if out["result_count"] != "3" {
+		t.Errorf("expected result_count=\"3\", got %v", out["result_count"])
 	}
 }
 
@@ -76,8 +76,8 @@ func TestEnrichLogsOutput_Truncation(t *testing.T) {
 	}
 	out := enrichLogsOutput("query", string(long))
 
-	if out["truncated"] != true {
-		t.Error("expected truncated=true for oversized result")
+	if out["truncated"] != "true" {
+		t.Error("expected truncated=\"true\" for oversized result")
 	}
 }
 
