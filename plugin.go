@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -299,7 +300,11 @@ func (p *QueryVLogsPlugin) ConfigUpdated(_ context.Context, config map[string]st
 }
 
 func (p *QueryVLogsPlugin) applyConfig(config map[string]string) {
-	if url, ok := config["logs_url"]; ok && url != "" {
+	url := config["logs_url"]
+	if url == "" {
+		url = os.Getenv("MIRASTACK_LOGS_URL")
+	}
+	if url != "" {
 		p.client = NewVLogsClient(url)
 		if p.logger != nil {
 			p.logger.Info("VictoriaLogs client updated", zap.String("url", url))
