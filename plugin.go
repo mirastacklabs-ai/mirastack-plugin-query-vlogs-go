@@ -157,6 +157,32 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 				},
 			},
 			{
+				ID: "search",
+				Description: "Search logs using structured parameters — service name, log level, and keywords. " +
+					"The agent automatically discovers available log fields, determines which field holds " +
+					"service and level information, and builds a proper LogsQL query internally. " +
+					"Use this instead of 'query' when the user describes what they want in natural language " +
+					"rather than providing a raw LogsQL expression.",
+				Permission: mirastack.PermissionRead,
+				Stages:     []mirastack.DevOpsStage{mirastack.StageObserve},
+				Intents: []mirastack.IntentPattern{
+					{Pattern: "search logs for service", Description: "Search logs by service name", Priority: 10},
+					{Pattern: "find errors for", Description: "Find error logs for a service", Priority: 10},
+					{Pattern: "show me logs from", Description: "Show logs from a specific service", Priority: 9},
+					{Pattern: "log errors", Description: "Search for error-level log entries", Priority: 9},
+					{Pattern: "what errors", Description: "Find errors in logs", Priority: 8},
+				},
+				InputParams: []mirastack.ParamSchema{
+					{Name: "service", Type: "string", Required: false, Description: "Service name to filter logs (auto-discovers the correct field name)"},
+					{Name: "level", Type: "string", Required: false, Description: "Log level filter: error, warn, info, debug (auto-discovers the correct field name)"},
+					{Name: "keywords", Type: "string", Required: false, Description: "Space-separated keywords to search in log message body"},
+					{Name: "limit", Type: "string", Required: false, Description: "Maximum entries to return (default: 100)"},
+				},
+				OutputParams: []mirastack.ParamSchema{
+					{Name: "result", Type: "json", Required: true, Description: "Log entries plus metadata: constructed LogsQL query, discovered fields, result count"},
+				},
+			},
+			{
 				ID: "delete_stream",
 				Description: "Delete log entries matching a LogsQL filter expression. " +
 					"This is a destructive ADMIN operation that permanently removes matching logs. " +
@@ -272,6 +298,8 @@ func (p *QueryVLogsPlugin) dispatch(ctx context.Context, action string, params m
 		return p.actionStreams(ctx, params, tr)
 	case "stats":
 		return p.actionStats(ctx, params, tr)
+	case "search":
+		return p.actionSearch(ctx, params, tr)
 	case "delete_stream":
 		return p.actionDeleteStream(ctx, params, tr)
 	default:

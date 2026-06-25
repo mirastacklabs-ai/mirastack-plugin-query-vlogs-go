@@ -4,7 +4,7 @@
 #   docker buildx build --platform linux/amd64,linux/arm64 \
 #     -f agents/oss/mirastack-plugin-query-vlogs-go/Dockerfile .
 
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
 ARG TARGETOS
 ARG TARGETARCH
 
