@@ -4,10 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
+	"time"
 
 	mirastack "github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
 	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go/datetimeutils"
+	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go/telemetrycache"
 )
 
 // isValidVLogsTimeParam rejects empty, whitespace-only, bare "-" and bare "+"
@@ -15,6 +18,85 @@ import (
 func isValidVLogsTimeParam(v string) bool {
 	v = strings.TrimSpace(v)
 	return v != "" && v != "-" && v != "+"
+}
+
+func sanitizeLogsQL(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return ""
+	}
+	if strings.HasPrefix(q, "```") && strings.HasSuffix(q, "```") {
+		inner := strings.TrimSuffix(strings.TrimPrefix(q, "```"), "```")
+		inner = strings.TrimSpace(inner)
+		if nl := strings.IndexByte(inner, '\n'); nl >= 0 {
+			first := strings.TrimSpace(inner[:nl])
+			rest := strings.TrimSpace(inner[nl+1:])
+			if first != "" && !strings.ContainsAny(first, " \t") {
+				inner = rest
+			}
+		}
+		q = strings.TrimSpace(inner)
+	}
+	q = trimTrailingSemicolonOutsideQuotes(q)
+	return strings.TrimSpace(q)
+}
+
+func trimTrailingSemicolonOutsideQuotes(q string) string {
+	end := len(q) - 1
+	for end >= 0 {
+		switch q[end] {
+		case ' ', '\t', '\n', '\r':
+			end--
+		default:
+			goto foundEnd
+		}
+	}
+	return ""
+
+foundEnd:
+	if q[end] != ';' {
+		return q
+	}
+
+	inSingle := false
+	inDouble := false
+	escaped := false
+	for i := 0; i <= end; i++ {
+		ch := q[i]
+		if escaped {
+			escaped = false
+			continue
+		}
+		if ch == '\\' {
+			escaped = true
+			continue
+		}
+		if ch == '"' && !inSingle {
+			inDouble = !inDouble
+			continue
+		}
+		if ch == '\'' && !inDouble {
+			inSingle = !inSingle
+			continue
+		}
+	}
+	if inSingle || inDouble {
+		return q
+	}
+	return strings.TrimSpace(q[:end])
+}
+
+func protectLogsQLForCache(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return q
+	}
+	// telemetrycache in older SDK releases sanitizes with PromQL rules and can
+	// strip a trailing quote from expressions like service_name:"payments".
+	if strings.HasSuffix(q, `"`) || strings.HasSuffix(q, `'`) {
+		return "(" + q + ")"
+	}
+	return q
 }
 
 // resolveStartEnd returns start/end strings, preferring engine-parsed TimeRange.
@@ -39,7 +121,7 @@ func resolveStartEnd(params map[string]string, tr *mirastack.TimeRange) (start, 
 // Each action maps to a VictoriaLogs LogsQL API endpoint.
 
 func (p *QueryVLogsPlugin) actionQuery(ctx context.Context, params map[string]string, tr *mirastack.TimeRange) (string, error) {
-	query := params["query"]
+	query := sanitizeLogsQL(params["query"])
 	if query == "" {
 		return "", fmt.Errorf("query parameter is required for query action")
 	}
@@ -52,16 +134,42 @@ func (p *QueryVLogsPlugin) actionQuery(ctx context.Context, params map[string]st
 }
 
 func (p *QueryVLogsPlugin) actionHits(ctx context.Context, params map[string]string, tr *mirastack.TimeRange) (string, error) {
-	query := params["query"]
+	query := protectLogsQLForCache(sanitizeLogsQL(params["query"]))
 	if query == "" {
 		query = "*"
 	}
+	startSec, endSec := resolveLogsRangeBoundsSec(params, tr)
 	step := params["step"]
 	if step == "" {
-		step = "5m"
+		step = telemetrycache.AdaptiveStep(startSec*1000, endSec*1000)
 	}
-	start, end := resolveStartEnd(params, tr)
-	return p.client.Hits(ctx, query, start, end, step, params["field"])
+	dsID := resolveLogsDataSourceID(params)
+	result, err := telemetrycache.WithStepRetry(startSec, endSec, step, func(stepForRun string) ([]byte, error) {
+		return telemetrycache.HitsCached(
+			ctx,
+			p.engine,
+			dsID,
+			query,
+			strings.TrimSpace(params["field"]),
+			startSec,
+			endSec,
+			stepForRun,
+			func(filteredQuery string, cStart, cEnd int64, chunkStep string) ([]byte, error) {
+				return bytesFromString(p.client.Hits(
+					ctx,
+					filteredQuery,
+					datetimeutils.FormatRFC3339(cStart*1000),
+					datetimeutils.FormatRFC3339(cEnd*1000),
+					chunkStep,
+					params["field"],
+				))
+			},
+		)
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
 }
 
 func (p *QueryVLogsPlugin) actionFieldNames(ctx context.Context, params map[string]string, tr *mirastack.TimeRange) (string, error) {
@@ -104,12 +212,40 @@ func (p *QueryVLogsPlugin) actionStreams(ctx context.Context, params map[string]
 }
 
 func (p *QueryVLogsPlugin) actionStats(ctx context.Context, params map[string]string, tr *mirastack.TimeRange) (string, error) {
-	query := params["query"]
+	query := protectLogsQLForCache(sanitizeLogsQL(params["query"]))
 	if query == "" {
 		return "", fmt.Errorf("query parameter is required for stats action (use LogsQL with | stats pipe)")
 	}
-	start, end := resolveStartEnd(params, tr)
-	return p.client.StatsQuery(ctx, query, start, end)
+	startSec, endSec := resolveLogsRangeBoundsSec(params, tr)
+	step := params["step"]
+	if step == "" {
+		step = telemetrycache.AdaptiveStep(startSec*1000, endSec*1000)
+	}
+	dsID := resolveLogsDataSourceID(params)
+	result, err := telemetrycache.WithStepRetry(startSec, endSec, step, func(stepForRun string) ([]byte, error) {
+		return telemetrycache.StatsRangeCached(
+			ctx,
+			p.engine,
+			dsID,
+			query,
+			startSec,
+			endSec,
+			stepForRun,
+			func(cStart, cEnd int64, chunkStep string) ([]byte, error) {
+				return bytesFromString(p.client.StatsRangeQuery(
+					ctx,
+					query,
+					datetimeutils.FormatRFC3339(cStart*1000),
+					datetimeutils.FormatRFC3339(cEnd*1000),
+					chunkStep,
+				))
+			},
+		)
+	})
+	if err != nil {
+		return "", err
+	}
+	return string(result), nil
 }
 
 // actionSearch builds a LogsQL query from structured params (service, level, keywords)
@@ -259,6 +395,62 @@ func countNDJSONLines(raw string) int {
 		}
 	}
 	return count
+}
+
+func resolveLogsDataSourceID(params map[string]string) string {
+	for _, k := range []string{"data_source_id", "datasource_id", "integration_id"} {
+		if v := strings.TrimSpace(params[k]); v != "" {
+			return v
+		}
+	}
+	return "default"
+}
+
+func resolveLogsRangeBoundsSec(params map[string]string, tr *mirastack.TimeRange) (int64, int64) {
+	if tr != nil && tr.StartEpochMs > 0 {
+		return tr.StartEpochMs / 1000, tr.EndEpochMs / 1000
+	}
+	nowSec := time.Now().UTC().Unix()
+	startSec, startOK := logsTimeParamToSec(params["start"], nowSec)
+	endSec, endOK := logsTimeParamToSec(params["end"], nowSec)
+	switch {
+	case !startOK && !endOK:
+		endSec = nowSec
+		startSec = endSec - 3600
+	case !startOK && endOK:
+		startSec = endSec - 3600
+	case startOK && !endOK:
+		endSec = nowSec
+	}
+	if endSec <= startSec {
+		endSec = nowSec
+		startSec = endSec - 3600
+	}
+	return startSec, endSec
+}
+
+func logsTimeParamToSec(raw string, nowSec int64) (int64, bool) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return 0, false
+	}
+	if v == "now" {
+		return nowSec, true
+	}
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if n > 1_000_000_000_000 {
+			return n / 1000, true
+		}
+		return n, true
+	}
+	return 0, false
+}
+
+func bytesFromString(s string, err error) ([]byte, error) {
+	if err != nil {
+		return nil, err
+	}
+	return []byte(s), nil
 }
 
 func (p *QueryVLogsPlugin) actionDeleteStream(ctx context.Context, params map[string]string, tr *mirastack.TimeRange) (string, error) {

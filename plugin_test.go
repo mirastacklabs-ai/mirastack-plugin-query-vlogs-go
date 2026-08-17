@@ -44,7 +44,7 @@ func TestInfo_PluginIntentsExpanded(t *testing.T) {
 }
 
 func TestEnrichLogsOutput_BasicFields(t *testing.T) {
-	out := enrichLogsOutput("query", `{"msg":"test"}`)
+	out := enrichLogsOutput("query", nil, `{"msg":"test"}`)
 
 	if out["action"] != "query" {
 		t.Errorf("expected action=query, got %v", out["action"])
@@ -53,19 +53,41 @@ func TestEnrichLogsOutput_BasicFields(t *testing.T) {
 
 func TestEnrichLogsOutput_CountsNDJSONLines(t *testing.T) {
 	ndjson := "{\"msg\":\"line1\"}\n{\"msg\":\"line2\"}\n{\"msg\":\"line3\"}\n"
-	out := enrichLogsOutput("query", ndjson)
+	out := enrichLogsOutput("query", nil, ndjson)
 
-	if out["result_count"] != "3" {
-		t.Errorf("expected result_count=\"3\", got %v", out["result_count"])
+	if out["result_count"] != 3 {
+		t.Errorf("expected result_count=3, got %v", out["result_count"])
+	}
+}
+
+func TestEnrichLogsOutput_EchoesQueryContext(t *testing.T) {
+	out := enrichLogsOutput("query", map[string]string{
+		"query": "service.name:upi-switch AND _severity:error",
+		"limit": "50",
+		"start": "2026-07-11T10:00:00Z",
+		"end":   "2026-07-11T11:00:00Z",
+	}, `{"msg":"ok"}`)
+
+	if out["query"] != "service.name:upi-switch AND _severity:error" {
+		t.Errorf("expected echoed query, got %q", out["query"])
+	}
+	if out["limit"] != "50" {
+		t.Errorf("expected echoed limit, got %q", out["limit"])
+	}
+	if out["start"] != "2026-07-11T10:00:00Z" {
+		t.Errorf("expected echoed start, got %q", out["start"])
+	}
+	if out["end"] != "2026-07-11T11:00:00Z" {
+		t.Errorf("expected echoed end, got %q", out["end"])
 	}
 }
 
 func TestEnrichLogsOutput_JSONArray(t *testing.T) {
 	raw := `["field_a","field_b","field_c"]`
-	out := enrichLogsOutput("field_names", raw)
+	out := enrichLogsOutput("field_names", nil, raw)
 
-	if out["result_count"] != "3" {
-		t.Errorf("expected result_count=\"3\", got %v", out["result_count"])
+	if out["result_count"] != 3 {
+		t.Errorf("expected result_count=3, got %v", out["result_count"])
 	}
 }
 
@@ -74,15 +96,15 @@ func TestEnrichLogsOutput_Truncation(t *testing.T) {
 	for i := range long {
 		long[i] = 'x'
 	}
-	out := enrichLogsOutput("query", string(long))
+	out := enrichLogsOutput("query", nil, string(long))
 
-	if out["truncated"] != "true" {
-		t.Error("expected truncated=\"true\" for oversized result")
+	if out["truncated"] != true {
+		t.Error("expected truncated=true for oversized result")
 	}
 }
 
 func TestEnrichLogsOutput_JSONMarshalable(t *testing.T) {
-	out := enrichLogsOutput("stats", `{"count":42}`)
+	out := enrichLogsOutput("stats", nil, `{"count":42}`)
 
 	_, err := json.Marshal(out)
 	if err != nil {

@@ -5,12 +5,20 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
+	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go/obs"
 	"go.uber.org/zap"
 )
+
+// catalogServicesValueSource constrains a service-name parameter to the set of
+// services the tenant's observability catalog has actually discovered. The
+// engine rejects a value outside that set, re-prompts the LLM with the real
+// candidates, and asks the user if that still fails — which is what stops a
+// near-miss like "upi switch" from silently querying a service named
+// "upi-switch" and returning an empty result that looks like an outage.
+const catalogServicesValueSource = "dynamic:catalog.services"
 
 // QueryVLogsPlugin queries VictoriaLogs using the LogsQL API.
 // The "v" prefix denotes Victoria-specific. Enterprise versions for other log backends
@@ -24,6 +32,25 @@ type QueryVLogsPlugin struct {
 // SetEngineContext injects the engine callback context (pull model config).
 func (p *QueryVLogsPlugin) SetEngineContext(ec *mirastack.EngineContext) {
 	p.engine = ec
+}
+
+func logsRouting(
+	acceptedIntentDomain string,
+	capabilityDomain string,
+	positiveUseCases []string,
+	negativeUseCases []string,
+	entityTypes []string,
+) mirastack.RoutingSemantics {
+	return mirastack.RoutingSemantics{
+		SchemaVersion:         mirastack.RoutingSemanticsSchemaVersionV1,
+		AcceptedIntentDomains: []string{acceptedIntentDomain},
+		CapabilityDomain:      capabilityDomain,
+		PositiveUseCases:      positiveUseCases,
+		NegativeUseCases:      negativeUseCases,
+		SignalDomains:         []string{"core.signal.logs"},
+		BackendDomains:        []string{"core.backend.victorialogs"},
+		EntityTypes:           entityTypes,
+	}
 }
 
 func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
@@ -50,6 +77,13 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "grep logs for", Description: "Search logs matching a pattern", Priority: 8},
 					{Pattern: "log entries containing", Description: "Find logs containing specific text", Priority: 7},
 				},
+				Routing: logsRouting(
+					"core.observe.logs.query",
+					"core.observe.logs.query.search",
+					[]string{"Search log lines with explicit LogsQL filters."},
+					[]string{"Do not use when structured service-level search parameters are preferred."},
+					[]string{"core.entity.log", "core.entity.service"},
+				),
 				InputParams: []mirastack.ParamSchema{
 					{Name: "query", Type: "string", Required: true, Description: "LogsQL query expression (e.g. '_msg:error AND service:payment')"},
 					{Name: "limit", Type: "string", Required: false, Description: "Maximum number of log entries to return (default: 100)"},
@@ -70,6 +104,13 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "error spike", Description: "Detect spikes in error log volume", Priority: 8},
 					{Pattern: "log frequency", Description: "Show log event frequency over time", Priority: 7},
 				},
+				Routing: logsRouting(
+					"core.observe.logs.analytics",
+					"core.observe.logs.analytics.hits",
+					[]string{"Measure log volume trends across time buckets."},
+					[]string{"Do not use when raw log records are required."},
+					[]string{"core.entity.log", "core.entity.timeseries"},
+				),
 				InputParams: []mirastack.ParamSchema{
 					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter expression (default: * for all logs)"},
 					{Name: "step", Type: "string", Required: false, Description: "Time bucket step (e.g., 1m, 5m, 1h). Defaults to 5m."},
@@ -91,6 +132,13 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "what log fields exist", Description: "Discover log schema fields", Priority: 8},
 					{Pattern: "log schema", Description: "Show log entry structure", Priority: 7},
 				},
+				Routing: logsRouting(
+					"core.observe.logs.discovery",
+					"core.observe.logs.discovery.field_names",
+					[]string{"Discover available structured field keys in log records."},
+					[]string{"Do not use to enumerate values for a known field."},
+					[]string{"core.entity.log", "core.entity.label"},
+				),
 				InputParams: []mirastack.ParamSchema{
 					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter to scope field discovery"},
 				},
@@ -110,6 +158,13 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "unique values in logs", Description: "Find unique field values in logs", Priority: 8},
 					{Pattern: "which log services", Description: "Find service names from log fields", Priority: 7},
 				},
+				Routing: logsRouting(
+					"core.observe.logs.discovery",
+					"core.observe.logs.discovery.field_values",
+					[]string{"Enumerate observed values for a selected log field."},
+					[]string{"Do not use for full-text log search across message bodies."},
+					[]string{"core.entity.log", "core.entity.label"},
+				),
 				InputParams: []mirastack.ParamSchema{
 					{Name: "field", Type: "string", Required: true, Description: "Field name to get values for (e.g., 'service', 'level', 'status')"},
 					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter to scope values"},
@@ -130,6 +185,13 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "which apps produce logs", Description: "Find applications generating logs", Priority: 8},
 					{Pattern: "log sources", Description: "List sources of log data", Priority: 7},
 				},
+				Routing: logsRouting(
+					"core.observe.logs.discovery",
+					"core.observe.logs.discovery.streams",
+					[]string{"List unique log streams and source label combinations."},
+					[]string{"Do not use for aggregated statistics or chart-ready counts."},
+					[]string{"core.entity.log_stream", "core.entity.service"},
+				),
 				InputParams: []mirastack.ParamSchema{
 					{Name: "query", Type: "string", Required: false, Description: "LogsQL filter to scope streams"},
 				},
@@ -149,6 +211,13 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "count log events", Description: "Count log entries matching criteria", Priority: 8},
 					{Pattern: "aggregate logs", Description: "Run server-side log aggregation", Priority: 7},
 				},
+				Routing: logsRouting(
+					"core.observe.logs.analytics",
+					"core.observe.logs.analytics.stats",
+					[]string{"Compute server-side aggregates from LogsQL stats expressions."},
+					[]string{"Do not use when raw logs are needed for forensic review."},
+					[]string{"core.entity.log", "core.entity.aggregation"},
+				),
 				InputParams: []mirastack.ParamSchema{
 					{Name: "query", Type: "string", Required: true, Description: "LogsQL stats expression (e.g. '_msg:error | stats count() by (service)')"},
 				},
@@ -172,8 +241,15 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "log errors", Description: "Search for error-level log entries", Priority: 9},
 					{Pattern: "what errors", Description: "Find errors in logs", Priority: 8},
 				},
+				Routing: logsRouting(
+					"core.observe.logs.query",
+					"core.observe.logs.query.assisted_search",
+					[]string{"Search logs using service, level, and keyword parameters."},
+					[]string{"Do not use for explicit advanced LogsQL crafted by operators."},
+					[]string{"core.entity.log", "core.entity.service"},
+				),
 				InputParams: []mirastack.ParamSchema{
-					{Name: "service", Type: "string", Required: false, Description: "Service name to filter logs (auto-discovers the correct field name)"},
+					{Name: "service", Type: "string", Required: false, Description: "Service name to filter logs (auto-discovers the correct field name)", ValueSource: catalogServicesValueSource},
 					{Name: "level", Type: "string", Required: false, Description: "Log level filter: error, warn, info, debug (auto-discovers the correct field name)"},
 					{Name: "keywords", Type: "string", Required: false, Description: "Space-separated keywords to search in log message body"},
 					{Name: "limit", Type: "string", Required: false, Description: "Maximum entries to return (default: 100)"},
@@ -194,6 +270,13 @@ func (p *QueryVLogsPlugin) Info() *mirastack.PluginInfo {
 					{Pattern: "purge log stream", Description: "Purge a log stream permanently", Priority: 8},
 					{Pattern: "remove log entries", Description: "Remove specific log data", Priority: 7},
 				},
+				Routing: logsRouting(
+					"core.operate.logs.hygiene",
+					"core.operate.logs.hygiene.delete_stream",
+					[]string{"Permanently purge log data that matches an approved filter."},
+					[]string{"Do not use for routine querying, exploration, or analytics."},
+					[]string{"core.entity.log_stream", "core.entity.log"},
+				),
 				InputParams: []mirastack.ParamSchema{
 					{Name: "match", Type: "string", Required: true, Description: "LogsQL filter expression selecting logs to delete (e.g. '_stream:{service=\"old-app\"}')"},
 				},
@@ -262,21 +345,29 @@ func (p *QueryVLogsPlugin) Execute(ctx context.Context, req *mirastack.ExecuteRe
 	if action == "" {
 		action = req.Params["action"]
 	}
+	observedAction := action
+	if observedAction == "" {
+		observedAction = "unknown"
+	}
+	actionCtx, actionSpan := obs.StartAction(ctx, "query_vlogs", observedAction, queryVLogsActionPermission(action))
 	if action == "" {
+		actionSpan.EndWithError(actionCtx, fmt.Errorf("action parameter is required"))
 		resp, _ := mirastack.RespondError("action parameter is required")
 		resp.Logs = []string{"missing required parameter: action"}
 		return resp, nil
 	}
 
-	result, err := p.dispatch(ctx, action, req.Params, req.TimeRange)
+	result, err := p.dispatch(actionCtx, action, req.Params, req.TimeRange)
 	if err != nil {
+		actionSpan.EndWithError(actionCtx, err)
 		resp, _ := mirastack.RespondError(err.Error())
 		resp.Logs = []string{fmt.Sprintf("action %s failed: %v", action, err)}
 		return resp, nil
 	}
 
-	resp, _ := mirastack.RespondJSON(enrichLogsOutput(action, result))
+	resp, _ := mirastack.RespondJSON(enrichLogsOutput(action, req.Params, result))
 	resp.Logs = []string{fmt.Sprintf("action %s completed", action)}
+	actionSpan.End(actionCtx)
 	return resp, nil
 }
 
@@ -340,21 +431,33 @@ func (p *QueryVLogsPlugin) applyConfig(config map[string]string) {
 	}
 }
 
-// enrichLogsOutput wraps raw log query results with metadata for LLM consumption.
-// enrichLogsOutput wraps raw log results with metadata for LLM consumption.
-// Return type is map[string]string to honour the plugin CallPlugin contract:
-// the SDK unmarshals plugin responses into map[string]string and will fail
-// on any non-string JSON value. All counts and booleans are stringified here.
-func enrichLogsOutput(action, raw string) map[string]string {
-	out := map[string]string{
+// enrichLogsOutput wraps raw log results with metadata for LLM/UI consumption.
+// It returns native JSON values so downstream renderers can hydrate directly.
+func enrichLogsOutput(action string, params map[string]string, raw string) map[string]any {
+	out := map[string]any{
 		"action": action,
-		"result": raw,
+	}
+	if q := strings.TrimSpace(params["query"]); q != "" {
+		out["query"] = q
+	}
+	if limit := strings.TrimSpace(params["limit"]); limit != "" {
+		out["limit"] = limit
+	}
+	if start := strings.TrimSpace(params["start"]); start != "" {
+		out["start"] = start
+	}
+	if end := strings.TrimSpace(params["end"]); end != "" {
+		out["end"] = end
 	}
 
 	const maxLen = 32000
 	if len(raw) > maxLen {
 		out["result"] = raw[:maxLen]
-		out["truncated"] = "true"
+		out["truncated"] = true
+	} else if parsed := parseJSON(raw); parsed != nil {
+		out["result"] = parsed
+	} else {
+		out["result"] = raw
 	}
 
 	// For query action, count NDJSON lines (each non-empty line is a log entry).
@@ -366,7 +469,7 @@ func enrichLogsOutput(action, raw string) map[string]string {
 				count++
 			}
 		}
-		out["result_count"] = strconv.Itoa(count)
+		out["result_count"] = count
 	}
 
 	// For JSON array responses, extract count.
@@ -374,13 +477,32 @@ func enrichLogsOutput(action, raw string) map[string]string {
 	if err := json.Unmarshal([]byte(raw), &parsed); err == nil {
 		switch d := parsed.(type) {
 		case []any:
-			out["result_count"] = strconv.Itoa(len(d))
+			out["result_count"] = len(d)
 		case map[string]any:
 			if values, ok := d["values"].([]any); ok {
-				out["result_count"] = strconv.Itoa(len(values))
+				out["result_count"] = len(values)
 			}
 		}
 	}
 
 	return out
+}
+
+func parseJSON(raw string) any {
+	var parsed any
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return nil
+	}
+	return parsed
+}
+
+func queryVLogsActionPermission(action string) string {
+	switch action {
+	case "delete_stream":
+		return "ADMIN"
+	case "query", "hits", "field_names", "field_values", "streams", "stats", "search":
+		return "READ"
+	default:
+		return "UNKNOWN"
+	}
 }

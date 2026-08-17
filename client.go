@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/mirastacklabs-ai/mirastack-agents-sdk-go/telemetrycache"
 )
 
 // VLogsClient is an HTTP client for the VictoriaLogs LogsQL API.
@@ -123,6 +125,21 @@ func (c *VLogsClient) StatsQuery(ctx context.Context, query, start, end string) 
 	return c.get(ctx, "/select/logsql/stats_query", params)
 }
 
+// StatsRangeQuery executes a LogsQL stats aggregation over a time range.
+func (c *VLogsClient) StatsRangeQuery(ctx context.Context, query, start, end, step string) (string, error) {
+	params := url.Values{"query": {query}}
+	if start != "" {
+		params.Set("start", start)
+	}
+	if end != "" {
+		params.Set("end", end)
+	}
+	if step != "" {
+		params.Set("step", step)
+	}
+	return c.get(ctx, "/select/logsql/stats_query_range", params)
+}
+
 // DeleteStream deletes log entries matching the provided stream selector.
 // VictoriaLogs endpoint: POST /delete with query parameter.
 func (c *VLogsClient) DeleteStream(ctx context.Context, match, start, end string) error {
@@ -181,7 +198,10 @@ func (c *VLogsClient) get(ctx context.Context, path string, params url.Values) (
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", fmt.Errorf("VictoriaLogs API error (HTTP %d): %s", resp.StatusCode, truncate(string(body), 512))
+		return "", &telemetrycache.HTTPStatusError{
+			Code: resp.StatusCode,
+			Body: fmt.Sprintf("VictoriaLogs API error (HTTP %d): %s", resp.StatusCode, truncate(string(body), 512)),
+		}
 	}
 
 	return string(body), nil

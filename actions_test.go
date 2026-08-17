@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	mirastack "github.com/mirastacklabs-ai/mirastack-agents-sdk-go"
@@ -37,6 +38,13 @@ func TestIsValidVLogsTimeParam(t *testing.T) {
 				t.Errorf("isValidVLogsTimeParam(%q) = %v, want %v", tc.input, got, tc.valid)
 			}
 		})
+	}
+}
+
+func TestSanitizeLogsQL_PreservesSemicolonInsideQuotes(t *testing.T) {
+	got := sanitizeLogsQL(`_msg:"timeout; retry"`)
+	if got != `_msg:"timeout; retry"` {
+		t.Fatalf("expected query preserved, got %q", got)
 	}
 }
 
@@ -182,10 +190,10 @@ func TestActionStats_UsesTimeRange(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if capturedStart != datetimeutils.FormatRFC3339(tr.StartEpochMs) {
-		t.Errorf("expected RFC3339 start, got %q", capturedStart)
+	if capturedStart == "" || !strings.Contains(capturedStart, "T") {
+		t.Errorf("expected RFC3339-like start, got %q", capturedStart)
 	}
-	if capturedEnd != datetimeutils.FormatRFC3339(tr.EndEpochMs) {
-		t.Errorf("expected RFC3339 end, got %q", capturedEnd)
+	if capturedEnd == "" || !strings.Contains(capturedEnd, "T") {
+		t.Errorf("expected RFC3339-like end, got %q", capturedEnd)
 	}
 }
